@@ -1,16 +1,17 @@
 // =========================
-// Express web server (health check)
+// Express web server (Render health check)
 // =========================
 const express = require('express');
 const app = express();
+
 const PORT = process.env.PORT || 3000;
 
-app.get('/healthz', (req, res) => {
-  res.status(200).send('OK');
+app.get('/', (req, res) => {
+  res.status(200).send('Bot is alive');
 });
 
 app.listen(PORT, () => {
-  console.log(`🚀 Web server running on port ${PORT}`);
+  console.log(`🌐 Web server running on port ${PORT}`);
 });
 
 // =========================
@@ -41,7 +42,11 @@ if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR);
 if (!fs.existsSync(SETTINGS_FILE)) fs.writeFileSync(SETTINGS_FILE, '{}');
 
 function loadSettings() {
-  return JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8'));
+  try {
+    return JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8'));
+  } catch {
+    return {};
+  }
 }
 
 function saveSettings(data) {
@@ -68,36 +73,39 @@ if (!process.env.DISCORD_BOT_TOKEN) {
 }
 
 // =========================
+// Slash command definitions
+// =========================
+const commands = [
+  new SlashCommandBuilder()
+    .setName('verify')
+    .setDescription('Verify your Minecraft Bedrock username')
+    .addStringOption(o =>
+      o.setName('username')
+        .setDescription('Minecraft username')
+        .setRequired(true)
+    ),
+
+  new SlashCommandBuilder()
+    .setName('setverifychannel')
+    .setDescription('Set the verification channel')
+    .setDefaultMemberPermissions(PermissionsBitField.Flags.ManageGuild),
+
+  new SlashCommandBuilder()
+    .setName('pauseverify')
+    .setDescription('Pause verification')
+    .setDefaultMemberPermissions(PermissionsBitField.Flags.ManageGuild),
+
+  new SlashCommandBuilder()
+    .setName('resumeverify')
+    .setDescription('Resume verification')
+    .setDefaultMemberPermissions(PermissionsBitField.Flags.ManageGuild)
+].map(c => c.toJSON());
+
+// =========================
 // Ready
 // =========================
 client.once('ready', async () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
-
-  const commands = [
-    new SlashCommandBuilder()
-      .setName('verify')
-      .setDescription('Verify your Minecraft Bedrock username')
-      .addStringOption(o =>
-        o.setName('username')
-          .setDescription('Minecraft username')
-          .setRequired(true)
-      ),
-
-    new SlashCommandBuilder()
-      .setName('setverifychannel')
-      .setDescription('Set the verification channel')
-      .setDefaultMemberPermissions(PermissionsBitField.Flags.ManageGuild),
-
-    new SlashCommandBuilder()
-      .setName('pauseverify')
-      .setDescription('Pause verification system')
-      .setDefaultMemberPermissions(PermissionsBitField.Flags.ManageGuild),
-
-    new SlashCommandBuilder()
-      .setName('resumeverify')
-      .setDescription('Resume verification system')
-      .setDefaultMemberPermissions(PermissionsBitField.Flags.ManageGuild)
-  ].map(c => c.toJSON());
 
   const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_BOT_TOKEN);
 
@@ -117,89 +125,109 @@ client.once('ready', async () => {
     }
   }
 
-  console.log('✅ Commands registered');
+  console.log('✅ Slash commands registered');
 });
 
 // =========================
-// Message moderation
+// Register commands for NEW servers
+// =========================
+client.on('guildCreate', async (guild) => {
+  const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_BOT_TOKEN);
+
+  await rest.put(
+    Routes.applicationGuildCommands(client.user.id, guild.id),
+    { body: commands }
+  );
+
+  console.log(`✅ Commands registered for new server: ${guild.name}`);
+});
+
+// =========================
+// Message moderation (verify channel)
 // =========================
 client.on('messageCreate', async (message) => {
   if (message.author.bot || !message.guild) return;
 
   const settings = loadSettings();
   const guildSettings = settings[message.guild.id];
-  if (!guildSettings) return;
-
+  if (!guildSettings?.verifyChannelId) return;
   if (guildSettings.paused) return;
   if (message.channel.id !== guildSettings.verifyChannelId) return;
 
   try {
     await message.delete();
     await message.author.send(
-      "⚠️ **Do not type in the verify channel**\n\nUse:\n`/verify <Minecraft Username>`"
+      '⚠️ **Do not type in the verify channel**\n\nUse:\n`/verify <Your Minecraft Username>`'
     ).catch(() => {});
   } catch {}
 });
 
 // =========================
-// Slash commands
+// Slash commands handler
 // =========================
 client.on('interactionCreate', async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
 
+  // Prevent "application not responding"
+  await interaction.deferReply({ ephemeral: true });
+
   const settings = loadSettings();
   const guildId = interaction.guild.id;
-
   settings[guildId] ??= { paused: false };
 
+  // -------------------------
   // Set verify channel
+  // -------------------------
   if (interaction.commandName === 'setverifychannel') {
     settings[guildId].verifyChannelId = interaction.channel.id;
     settings[guildId].paused = false;
     saveSettings(settings);
 
-    return interaction.reply({
-      content: '✅ Verify channel set.',
-      ephemeral: true
-    });
+    return interaction.editReply('✅ Verify channel set.');
   }
 
-  // Pause
+  // -------------------------
+  // Pause verification
+  // -------------------------
   if (interaction.commandName === 'pauseverify') {
     settings[guildId].paused = true;
     saveSettings(settings);
 
-    return interaction.reply({
-      content: '⏸ Verification paused.',
-      ephemeral: true
-    });
+    return interaction.editReply('⏸ Verification paused.');
   }
 
-  // Resume
+  // -------------------------
+  // Resume verification
+  // -------------------------
   if (interaction.commandName === 'resumeverify') {
     settings[guildId].paused = false;
     saveSettings(settings);
 
-    return interaction.reply({
-      content: '▶️ Verification resumed.',
-      ephemeral: true
-    });
+    return interaction.editReply('▶️ Verification resumed.');
   }
 
-  // Verify
+  // -------------------------
+  // Verify user
+  // -------------------------
   if (interaction.commandName === 'verify') {
+    if (!settings[guildId].verifyChannelId) {
+      return interaction.editReply('❌ Verification is not set up yet.');
+    }
+
     if (settings[guildId].paused) {
-      return interaction.reply({
-        content: '⏸ Verification is currently paused.',
-        ephemeral: true
-      });
+      return interaction.editReply('⏸ Verification is currently paused.');
     }
 
     const username = interaction.options.getString('username');
-    await interaction.deferReply({ ephemeral: true });
-
     const member = interaction.member;
-    const role = interaction.guild.roles.cache.find(r => r.name === VERIFIED_ROLE_NAME);
+
+    let role = interaction.guild.roles.cache.find(r => r.name === VERIFIED_ROLE_NAME);
+    if (!role) {
+      role = await interaction.guild.roles.create({
+        name: VERIFIED_ROLE_NAME,
+        color: 0x00ff00
+      });
+    }
 
     if (!member.roles.cache.has(role.id)) {
       if (interaction.guild.ownerId !== member.id) {
@@ -208,7 +236,7 @@ client.on('interactionCreate', async (interaction) => {
       await member.roles.add(role);
     }
 
-    await interaction.editReply(`✅ Verified as **${username}**`);
+    return interaction.editReply(`✅ Verified as **${username}**`);
   }
 });
 
