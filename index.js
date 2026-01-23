@@ -165,6 +165,15 @@ client.on('interactionCreate', async interaction => {
 });
 
 // =========================
-// LOGIN
+// LOGIN (Improved Debugging)
 // =========================
-client.login(process.env.DISCORD_BOT_TOKEN);
+console.log("⏳ Starting Discord login process...");
+
+client.login(process.env.DISCORD_BOT_TOKEN)
+  .then(() => {
+    console.log("📡 Login request sent to Discord. Waiting for 'Ready' event...");
+  })
+  .catch(err => {
+    console.error("❌ DISCORD LOGIN FAILED!");
+    console.error(err); // This will print the exact reason (e.g., "Invalid Token")
+  });
