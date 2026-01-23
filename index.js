@@ -1,17 +1,8 @@
 // =========================
-// Express (Render health check)
-// =========================
-const express = require('express');
-const app = express();
-
-const PORT = process.env.PORT || 3000;
-app.get('/', (_, res) => res.send('Bot alive'));
-app.listen(PORT, () => console.log(`🌐 Web server on ${PORT}`));
-
-// =========================
-// Discord setup
+// Setup & Environment
 // =========================
 require('dotenv').config();
+const express = require('express');
 const {
   Client,
   GatewayIntentBits,
@@ -20,10 +11,11 @@ const {
   SlashCommandBuilder,
   PermissionsBitField
 } = require('discord.js');
-
 const fs = require('fs');
 const path = require('path');
 
+const app = express();
+const PORT = process.env.PORT || 10000;
 const VERIFIED_ROLE_NAME = 'Verified';
 
 // =========================
@@ -43,7 +35,7 @@ const saveSettings = s =>
   fs.writeFileSync(SETTINGS_FILE, JSON.stringify(s, null, 2));
 
 // =========================
-// Client
+// Discord Client Setup
 // =========================
 const client = new Client({
   intents: [
@@ -52,34 +44,27 @@ const client = new Client({
   ]
 });
 
+// Debugging listeners
+client.on('debug', d => console.log(`[DEBUG] ${d}`));
+client.on('error', e => console.error(`[WS ERROR] ${e}`));
 process.on('unhandledRejection', console.error);
 
-if (!process.env.DISCORD_BOT_TOKEN) {
-  console.error('❌ TOKEN MISSING');
-  process.exit(1);
-}
-
 // =========================
-// Commands
+// Slash Commands Definition
 // =========================
 const commands = [
   new SlashCommandBuilder()
     .setName('verify')
     .setDescription('Verify your Minecraft username')
-    .addStringOption(o =>
-      o.setName('username').setDescription('Minecraft username').setRequired(true)
-    ),
-
+    .addStringOption(o => o.setName('username').setDescription('Minecraft username').setRequired(true)),
   new SlashCommandBuilder()
     .setName('setverifychannel')
     .setDescription('Set verify channel')
     .setDefaultMemberPermissions(PermissionsBitField.Flags.ManageGuild),
-
   new SlashCommandBuilder()
     .setName('pauseverify')
     .setDescription('Pause verification')
     .setDefaultMemberPermissions(PermissionsBitField.Flags.ManageGuild),
-
   new SlashCommandBuilder()
     .setName('resumeverify')
     .setDescription('Resume verification')
@@ -87,33 +72,26 @@ const commands = [
 ].map(c => c.toJSON());
 
 // =========================
-// READY — REGISTER COMMANDS
+// Events
 // =========================
 client.once('ready', async () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
-  console.log('🧠 App ID:', client.application.id);
-
-  const rest = new REST({ version: '10' })
-    .setToken(process.env.DISCORD_BOT_TOKEN);
-
-  for (const guild of client.guilds.cache.values()) {
-    console.log(`📦 Registering commands in ${guild.name}`);
-
+  
+  const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_BOT_TOKEN);
+  try {
+    console.log('📦 Registering commands...');
     await rest.put(
-      Routes.applicationGuildCommands(client.application.id, guild.id),
+      Routes.applicationCommands(client.application.id),
       { body: commands }
     );
+    console.log('✅ Commands registered globally');
+  } catch (err) {
+    console.error('❌ Command registration failed:', err);
   }
-
-  console.log('✅ Commands force-registered');
 });
 
-// =========================
-// Interaction handler
-// =========================
 client.on('interactionCreate', async interaction => {
   if (!interaction.isChatInputCommand()) return;
-
   await interaction.deferReply({ ephemeral: true });
 
   const settings = loadSettings();
@@ -139,18 +117,14 @@ client.on('interactionCreate', async interaction => {
   }
 
   if (interaction.commandName === 'verify') {
-    if (settings[gid].paused)
-      return interaction.editReply('⏸ Verification paused');
+    if (settings[gid].paused) return interaction.editReply('⏸ Verification paused');
 
     const username = interaction.options.getString('username');
     const member = interaction.member;
 
     let role = interaction.guild.roles.cache.find(r => r.name === VERIFIED_ROLE_NAME);
     if (!role) {
-      role = await interaction.guild.roles.create({
-        name: VERIFIED_ROLE_NAME,
-        color: 0x00ff00
-      });
+      role = await interaction.guild.roles.create({ name: VERIFIED_ROLE_NAME, color: 0x00ff00 });
     }
 
     if (!member.roles.cache.has(role.id)) {
@@ -159,27 +133,22 @@ client.on('interactionCreate', async interaction => {
       }
       await member.roles.add(role);
     }
-
     return interaction.editReply(`✅ Verified as **${username}**`);
   }
 });
+
 // =========================
-// DEBUGGING & LOGIN
+// Start Server and Login
 // =========================
+app.get('/', (_, res) => res.send('Bot is active'));
 
-// This will print every single step the bot takes to connect
-client.on('debug', d => console.log(`[DEBUG] ${d}`));
-
-// This catches any websocket errors
-client.on('error', e => console.error(`[WS ERROR] ${e}`));
-
-console.log("⏳ Starting Discord login process...");
-
-client.login(process.env.DISCORD_BOT_TOKEN)
-  .then(() => console.log("📡 Login call sent successfully!"))
-  .catch(err => console.error("❌ LOGIN FAILED:", err));
-
-// Move your web server to the VERY bottom to ensure it doesn't 
-// interfere with the login sequence
-app.listen(PORT, () => console.log(`🌐 Web server on ${PORT}`));
-
+app.listen(PORT, () => {
+  console.log(`🌐 Web server active on port ${PORT}`);
+  
+  if (!process.env.DISCORD_BOT_TOKEN) {
+    console.error('❌ TOKEN MISSING');
+  } else {
+    console.log("⏳ Starting Discord login...");
+    client.login(process.env.DISCORD_BOT_TOKEN).catch(console.error);
+  }
+});
