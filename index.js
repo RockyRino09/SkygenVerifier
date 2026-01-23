@@ -164,6 +164,11 @@ client.on('interactionCreate', async interaction => {
   }
 });
 
+// Add this before client.login
+client.on('debug', info => console.log(`[DEBUG] ${info}`));
+
+client.on('error', error => console.error(`[ERROR] ${error}`));
+
 // =========================
 // LOGIN (Improved Debugging)
 // =========================
