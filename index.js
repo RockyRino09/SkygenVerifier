@@ -163,22 +163,23 @@ client.on('interactionCreate', async interaction => {
     return interaction.editReply(`✅ Verified as **${username}**`);
   }
 });
-
-// Add this before client.login
-client.on('debug', info => console.log(`[DEBUG] ${info}`));
-
-client.on('error', error => console.error(`[ERROR] ${error}`));
-
 // =========================
-// LOGIN (Improved Debugging)
+// DEBUGGING & LOGIN
 // =========================
+
+// This will print every single step the bot takes to connect
+client.on('debug', d => console.log(`[DEBUG] ${d}`));
+
+// This catches any websocket errors
+client.on('error', e => console.error(`[WS ERROR] ${e}`));
+
 console.log("⏳ Starting Discord login process...");
 
 client.login(process.env.DISCORD_BOT_TOKEN)
-  .then(() => {
-    console.log("📡 Login request sent to Discord. Waiting for 'Ready' event...");
-  })
-  .catch(err => {
-    console.error("❌ DISCORD LOGIN FAILED!");
-    console.error(err); // This will print the exact reason (e.g., "Invalid Token")
-  });
+  .then(() => console.log("📡 Login call sent successfully!"))
+  .catch(err => console.error("❌ LOGIN FAILED:", err));
+
+// Move your web server to the VERY bottom to ensure it doesn't 
+// interfere with the login sequence
+app.listen(PORT, () => console.log(`🌐 Web server on ${PORT}`));
+
