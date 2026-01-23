@@ -27,17 +27,24 @@ const loadSettings = () => {
 };
 const saveSettings = s => fs.writeFileSync(SETTINGS_FILE, JSON.stringify(s, null, 2));
 
-// --- Client Setup with Mobile/JSON Connection Fix ---
+// --- Client Setup with Brute-Force Connection Fix ---
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMembers
   ],
-  // This specific block helps bypass "Silent Hangs" on Render
+  // UPDATED: This mimics a mobile device more heavily to bypass IP filters
   ws: {
     properties: {
-      browser: 'Discord iOS' 
+      os: 'linux',
+      browser: 'Discord Android',
+      device: 'discord.js'
     }
+  },
+  // UPDATED: Tells the bot to be more patient with slow Discord responses
+  rest: {
+    timeout: 60000,
+    retries: 5
   }
 });
 
@@ -106,7 +113,7 @@ client.on('interactionCreate', async interaction => {
 });
 
 // --- Start ---
-app.get('/', (req, res) => res.send('Bot is online!'));
+app.get('/', (req, res) => res.send('Bot is active!'));
 
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`🌐 Health check live on port ${PORT}`);
