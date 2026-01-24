@@ -33,29 +33,27 @@ const saveSettings = s => fs.writeFileSync(SETTINGS_FILE, JSON.stringify(s, null
 
 /* =========================
    DISCORD CLIENT
-   (Includes Mobile Identity Fix)
 ========================= */
 const client = new Client({
-  intents: [
-    GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMembers
-  ],
-  ws: {
-    properties: {
-      os: 'linux',
-      browser: 'Discord Android',
-      device: 'discord.js'
-    }
-  }
+  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers],
+  ws: { properties: { os: 'linux', browser: 'Discord Android', device: 'discord.js' } }
 });
 
 process.on('unhandledRejection', console.error);
 
 /* =========================
    SLASH COMMANDS
+   (FIXED: Added missing descriptions to options)
 ========================= */
 const commands = [
-  new SlashCommandBuilder().setName('verify').setDescription('Verify Minecraft username').addStringOption(o => o.setName('username').setRequired(true)),
+  new SlashCommandBuilder()
+    .setName('verify')
+    .setDescription('Verify your Minecraft username')
+    .addStringOption(o => 
+      o.setName('username')
+       .setDescription('Enter your Minecraft username') // <--- THIS WAS MISSING
+       .setRequired(true)
+    ),
   new SlashCommandBuilder().setName('setverifychannel').setDescription('Set channel').setDefaultMemberPermissions(PermissionsBitField.Flags.ManageGuild),
   new SlashCommandBuilder().setName('pauseverify').setDescription('Pause').setDefaultMemberPermissions(PermissionsBitField.Flags.ManageGuild),
   new SlashCommandBuilder().setName('resumeverify').setDescription('Resume').setDefaultMemberPermissions(PermissionsBitField.Flags.ManageGuild)
@@ -68,7 +66,6 @@ client.once('ready', async () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
   const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_BOT_TOKEN);
 
-  // Register commands globally (Better for Render)
   try {
     await rest.put(Routes.applicationCommands(client.user.id), { body: commands });
     console.log('✅ Global slash commands registered');
@@ -76,19 +73,18 @@ client.once('ready', async () => {
     console.error('❌ Command registration failed:', err);
   }
 
-  // Start Express to satisfy Render's health check
   const app = express();
   app.get('/', (_, res) => res.send('Bot alive and pinging!'));
   app.listen(PORT, '0.0.0.0', () => console.log(`🌐 Web server on ${PORT}`));
 
-  // SELF-PING SYSTEM (Keep-Alive)
-  // Replace the URL below with your actual Render URL
-  const RENDER_URL = `https://skygenverifier.onrender.com`; 
-  setInterval(() => {
-    axios.get(RENDER_URL)
-      .then(() => console.log('💓 Heartbeat: Keeping CPU active'))
-      .catch(() => console.log('💓 Heartbeat failed (Expected during restart)'));
-  }, 300000); // Every 5 minutes
+  // AUTOMATIC SELF-PING (No manual URL needed)
+  if (process.env.RENDER_EXTERNAL_URL) {
+    setInterval(() => {
+      axios.get(process.env.RENDER_EXTERNAL_URL)
+        .then(() => console.log('💓 Heartbeat: Staying active'))
+        .catch(() => console.log('💓 Heartbeat retry...'));
+    }, 300000);
+  }
 });
 
 /* =========================
@@ -107,39 +103,33 @@ client.on('interactionCreate', async interaction => {
     saveSettings(settings);
     return interaction.editReply('✅ Verify channel set');
   }
-
   if (interaction.commandName === 'pauseverify') {
     settings[gid].paused = true;
     saveSettings(settings);
     return interaction.editReply('⏸ Verification paused');
   }
-
   if (interaction.commandName === 'resumeverify') {
     settings[gid].paused = false;
     saveSettings(settings);
     return interaction.editReply('▶️ Verification resumed');
   }
-
   if (interaction.commandName === 'verify') {
     if (settings[gid].paused) return interaction.editReply('⏸ Verification is paused');
     const username = interaction.options.getString('username');
     const member = interaction.member;
 
     let role = interaction.guild.roles.cache.find(r => r.name === VERIFIED_ROLE_NAME);
-    if (!role) {
-      role = await interaction.guild.roles.create({ name: VERIFIED_ROLE_NAME, color: 0x00ff00 });
-    }
+    if (!role) role = await interaction.guild.roles.create({ name: VERIFIED_ROLE_NAME, color: 0x00ff00 });
 
-    if (interaction.guild.ownerId !== member.id) {
-      await member.setNickname(username).catch(() => {});
+    try {
+        if (interaction.guild.ownerId !== member.id) await member.setNickname(username);
+        await member.roles.add(role);
+        return interaction.editReply(`✅ Verified as **${username}**`);
+    } catch (e) {
+        return interaction.editReply(`❌ Role Hierarchy Error: Bot role must be higher than '${VERIFIED_ROLE_NAME}'.`);
     }
-    await member.roles.add(role);
-    return interaction.editReply(`✅ Verified as **${username}**`);
   }
 });
 
-/* =========================
-   LOGIN
-========================= */
 console.log('🚀 Logging in...');
 client.login(process.env.DISCORD_BOT_TOKEN);
