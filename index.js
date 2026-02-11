@@ -1,9 +1,9 @@
 require('dotenv').config();
+
 const fs = require('fs');
 const path = require('path');
 const express = require('express');
-const axios = require('axios');
-const { joinVoiceChannel, getVoiceConnection } = require('@discordjs/voice');
+
 const {
   Client,
   GatewayIntentBits,
@@ -13,12 +13,13 @@ const {
   PermissionsBitField
 } = require('discord.js');
 
+const { joinVoiceChannel, getVoiceConnection } = require('@discordjs/voice');
+
 /* =========================
    CONFIG
 ========================= */
 const VERIFIED_ROLE_NAME = 'Verified';
 const PORT = process.env.PORT || 8000;
-const APP_URL = process.env.APP_URL;
 
 if (!process.env.DISCORD_BOT_TOKEN) {
   console.error('❌ DISCORD_BOT_TOKEN missing');
@@ -41,14 +42,16 @@ const SETTINGS_FILE = path.join(DATA_DIR, 'settings.json');
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 if (!fs.existsSync(SETTINGS_FILE)) fs.writeFileSync(SETTINGS_FILE, '{}');
 
-const loadSettings = () => {
+function loadSettings() {
   try { return JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8')); }
   catch { return {}; }
-};
-const saveSettings = (data) => fs.writeFileSync(SETTINGS_FILE, JSON.stringify(data, null, 2));
+}
+function saveSettings(data) {
+  fs.writeFileSync(SETTINGS_FILE, JSON.stringify(data, null, 2));
+}
 
 /* =========================
-   CLIENT
+   DISCORD CLIENT
 ========================= */
 const client = new Client({
   intents: [
@@ -63,7 +66,7 @@ const client = new Client({
 process.on('unhandledRejection', console.error);
 
 /* =========================
-   COMMANDS (single source of truth)
+   SLASH COMMANDS
 ========================= */
 const COMMAND_BUILDERS = [
   new SlashCommandBuilder()
@@ -90,9 +93,14 @@ const COMMAND_BUILDERS = [
 
   new SlashCommandBuilder()
     .setName('joinvc')
-    .setDescription('Make the bot join and stay in your VC 24/7'),
+    .setDescription('Join your current voice channel and stay there'),
 
-  // Admin-only utility to fix duplicates / stale commands
+  new SlashCommandBuilder()
+    .setName('leavevc')
+    .setDescription('Leave the voice channel')
+    .setDefaultMemberPermissions(PermissionsBitField.Flags.ManageGuild),
+
+  // Admin command to wipe duplicates then re-register (fixes double /joinvc)
   new SlashCommandBuilder()
     .setName('synccommands')
     .setDescription('Admin: re-sync slash commands (fix duplicates)')
@@ -118,139 +126,197 @@ client.once('ready', async () => {
   } catch (err) {
     console.error('❌ Command registration failed:', err);
   }
-
-  if (APP_URL) {
-    setInterval(() => axios.get(APP_URL).catch(() => {}), 5 * 60 * 1000);
-    console.log(`💓 Heartbeat active → ${APP_URL}`);
-  }
 });
 
 /* =========================
    VERIFY CHANNEL MODERATION
 ========================= */
 client.on('messageCreate', async (message) => {
-  if (message.author.bot || !message.guild) return;
+  try {
+    if (!message.guild) return;
+    if (message.author.bot) return;
 
-  const settings = loadSettings();
-  const g = settings[message.guild.id];
-  if (!g?.verifyChannelId || g.paused) return;
-  if (message.channel.id !== g.verifyChannelId) return;
+    const settings = loadSettings();
+    const g = settings[message.guild.id];
+    if (!g?.verifyChannelId) return;
+    if (g.paused) return;
+    if (message.channel.id !== g.verifyChannelId) return;
 
-  await message.delete().catch(() => {});
-  message.author.send('⚠️ Do not type in the verify channel.\nUse `/verify <username>` instead.').catch(() => {});
+    await message.delete().catch(() => {});
+    await message.author.send(
+      '⚠️ Do not type in the verify channel.\nUse `/verify <username>` instead.'
+    ).catch(() => {});
+  } catch (e) {
+    console.error('messageCreate error:', e);
+  }
 });
+
+/* =========================
+   SAFE REPLY HELPERS
+========================= */
+async function safeReply(interaction, content, ephemeral = true) {
+  try {
+    if (interaction.deferred || interaction.replied) {
+      return await interaction.editReply({ content });
+    }
+    return await interaction.reply({ content, ephemeral });
+  } catch (e) {
+    // If even that fails, do nothing (prevents crash loops)
+    console.error('safeReply error:', e?.message || e);
+  }
+}
+
+async function safeDefer(interaction) {
+  try {
+    if (!interaction.deferred && !interaction.replied) {
+      await interaction.deferReply({ ephemeral: true });
+    }
+  } catch (e) {
+    console.error('safeDefer error:', e?.message || e);
+  }
+}
 
 /* =========================
    INTERACTIONS
 ========================= */
 client.on('interactionCreate', async (interaction) => {
-  if (!interaction.isChatInputCommand()) return;
-
-  const settings = loadSettings();
-  const gid = interaction.guild.id;
-  settings[gid] ??= { paused: false };
-
   try {
-    // --- Admin: fix duplicates and stale commands ---
-    if (interaction.commandName === 'synccommands') {
-      await interaction.deferReply({ ephemeral: true });
+    if (!interaction.isChatInputCommand()) return;
+    if (!interaction.inGuild()) {
+      return await safeReply(interaction, '❌ Use this command inside a server.');
+    }
+
+    const settings = loadSettings();
+    const gid = interaction.guildId;
+    settings[gid] ??= { paused: false };
+
+    const cmd = interaction.commandName;
+
+    // ---- synccommands ----
+    if (cmd === 'synccommands') {
+      await safeDefer(interaction);
 
       const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_BOT_TOKEN);
 
-      // 1) Clear global commands
+      // wipe global
       await rest.put(Routes.applicationCommands(client.user.id), { body: [] });
-
-      // 2) Clear this guild’s guild-commands too (kills old per-guild ones if you ever used them)
-      await rest.put(Routes.applicationGuildCommands(client.user.id, interaction.guild.id), { body: [] });
-
-      // 3) Re-register globals
+      // wipe this guild too (kills old per-guild commands if you ever used them)
+      await rest.put(Routes.applicationGuildCommands(client.user.id, gid), { body: [] });
+      // re-register
       await rest.put(Routes.applicationCommands(client.user.id), { body: COMMANDS_JSON });
 
-      return interaction.editReply('✅ Commands re-synced. Wait ~1 minute, then re-open Discord or type `/` again.');
+      return await safeReply(interaction, '✅ Commands re-synced. Close Discord fully and reopen, then type `/` again.');
     }
 
-    if (interaction.commandName === 'setverifychannel') {
-      settings[gid].verifyChannelId = interaction.channel.id;
+    // ---- setverifychannel ----
+    if (cmd === 'setverifychannel') {
+      settings[gid].verifyChannelId = interaction.channelId;
       settings[gid].paused = false;
       saveSettings(settings);
-      return interaction.reply({ content: '✅ Verify channel set', ephemeral: true });
+      return await safeReply(interaction, '✅ Verify channel set.');
     }
 
-    if (interaction.commandName === 'pauseverify') {
+    // ---- pauseverify ----
+    if (cmd === 'pauseverify') {
       settings[gid].paused = true;
       saveSettings(settings);
-      return interaction.reply({ content: '⏸ Verification paused', ephemeral: true });
+      return await safeReply(interaction, '⏸ Verification paused.');
     }
 
-    if (interaction.commandName === 'resumeverify') {
+    // ---- resumeverify ----
+    if (cmd === 'resumeverify') {
       settings[gid].paused = false;
       saveSettings(settings);
-      return interaction.reply({ content: '▶️ Verification resumed', ephemeral: true });
+      return await safeReply(interaction, '▶️ Verification resumed.');
     }
 
-    if (interaction.commandName === 'verify') {
+    // ---- verify ----
+    if (cmd === 'verify') {
+      await safeDefer(interaction);
+
       if (!settings[gid].verifyChannelId) {
-        return interaction.reply({ content: '❌ Verification not set up. Run `/setverifychannel` in your verify channel.', ephemeral: true });
+        return await safeReply(interaction, '❌ Not set up yet. Run `/setverifychannel` in your verify channel.');
       }
       if (settings[gid].paused) {
-        return interaction.reply({ content: '⏸ Verification is paused.', ephemeral: true });
+        return await safeReply(interaction, '⏸ Verification is paused.');
       }
 
-      const username = interaction.options.getString('username');
-      const member = interaction.member;
+      const username = interaction.options.getString('username', true);
 
-      let role = interaction.guild.roles.cache.find(r => r.name === VERIFIED_ROLE_NAME);
-      if (!role) role = await interaction.guild.roles.create({ name: VERIFIED_ROLE_NAME, color: 0x00ff00 });
+      const member = interaction.member; // should exist because inGuild()
+      const guild = interaction.guild;
 
-      // Role add should work if hierarchy is correct
-      await member.roles.add(role);
-
-      // Owner nickname: do NOT pretend it changed
-      if (interaction.guild.ownerId === member.id) {
-        return interaction.reply({
-          content: `✅ Verified as **${username}**.\nℹ️ I can’t change the **server owner’s** nickname on Discord, so please change it manually in Server Settings → Members.`,
-          ephemeral: true
-        });
+      // ensure role exists
+      let role = guild.roles.cache.find(r => r.name === VERIFIED_ROLE_NAME);
+      if (!role) {
+        role = await guild.roles.create({ name: VERIFIED_ROLE_NAME, color: 0x00ff00 }).catch(() => null);
+        if (!role) return await safeReply(interaction, '❌ I need **Manage Roles** to create the Verified role.');
       }
 
-      // Normal nickname change, but report if it fails
-      try {
-        await member.setNickname(username);
-        return interaction.reply({ content: `✅ Verified as **${username}** (nickname updated)`, ephemeral: true });
-      } catch {
-        return interaction.reply({
-          content: `✅ Verified as **${username}** (role added)\n⚠️ I couldn’t change your nickname. Make sure I have **Manage Nicknames** and my role is above your role.`,
-          ephemeral: true
-        });
+      // add role
+      await member.roles.add(role).catch(() => {});
+
+      // owner nickname: don’t lie
+      if (guild.ownerId === member.id) {
+        return await safeReply(
+          interaction,
+          `✅ Verified as **${username}** (role added).\nℹ️ I can’t change the **server owner’s** nickname — change it manually.`
+        );
       }
+
+      // nickname change
+      const nickOk = await member.setNickname(username).then(() => true).catch(() => false);
+
+      if (!nickOk) {
+        return await safeReply(
+          interaction,
+          `✅ Verified as **${username}** (role added).\n⚠️ I couldn’t change your nickname. Ensure I have **Manage Nicknames** and my role is above yours.`
+        );
+      }
+
+      return await safeReply(interaction, `✅ Verified as **${username}** (nickname updated).`);
     }
 
-    if (interaction.commandName === 'joinvc') {
-      // Defer so it never gets stuck on "thinking" if Discord is slow
-      await interaction.deferReply({ ephemeral: true });
+    // ---- joinvc ----
+    if (cmd === 'joinvc') {
+      await safeDefer(interaction);
 
-      const channel = interaction.member.voice?.channel;
-      if (!channel) return interaction.editReply('❌ Join a voice channel first.');
+      // member voice state can be null-ish; guard hard
+      const voiceChannel = interaction.member?.voice?.channel;
+      if (!voiceChannel) {
+        return await safeReply(interaction, '❌ Join a voice channel first.');
+      }
 
-      // If already connected, don’t create a second connection
-      const existing = getVoiceConnection(channel.guild.id);
+      const existing = getVoiceConnection(gid);
       if (!existing) {
         joinVoiceChannel({
-          channelId: channel.id,
-          guildId: channel.guild.id,
-          adapterCreator: channel.guild.voiceAdapterCreator,
+          channelId: voiceChannel.id,
+          guildId: gid,
+          adapterCreator: voiceChannel.guild.voiceAdapterCreator,
           selfDeaf: true
         });
       }
 
-      return interaction.editReply(`🔊 Joined **${channel.name}** and will stay 24/7.`);
+      return await safeReply(interaction, `🔊 Joined **${voiceChannel.name}** and will stay there.`);
+    }
+
+    // ---- leavevc ----
+    if (cmd === 'leavevc') {
+      await safeDefer(interaction);
+      const conn = getVoiceConnection(gid);
+      if (!conn) return await safeReply(interaction, 'ℹ️ I am not in a voice channel.');
+      conn.destroy();
+      return await safeReply(interaction, '👋 Left the voice channel.');
     }
 
   } catch (e) {
-    console.error(e);
-    // Best-effort error reply without double-responding
-    if (interaction.deferred) return interaction.editReply('❌ Something went wrong.');
-    if (!interaction.replied) return interaction.reply({ content: '❌ Something went wrong.', ephemeral: true });
+    console.error('interactionCreate crash:', e);
+    // IMPORTANT: never crash the process
+    try {
+      if (interaction && interaction.isChatInputCommand && interaction.isChatInputCommand()) {
+        await safeReply(interaction, '❌ Something went wrong.');
+      }
+    } catch {}
   }
 });
 
