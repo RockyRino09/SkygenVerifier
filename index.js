@@ -2,6 +2,8 @@ require('dotenv').config();
 const fs = require('fs');
 const path = require('path');
 const express = require('express');
+const axios = require('axios');
+const { joinVoiceChannel } = require('@discordjs/voice');
 const {
   Client,
   GatewayIntentBits,
@@ -10,13 +12,13 @@ const {
   SlashCommandBuilder,
   PermissionsBitField
 } = require('discord.js');
-const { joinVoiceChannel, getVoiceConnection } = require('@discordjs/voice');
 
 /* =========================
    CONFIG
 ========================= */
 const VERIFIED_ROLE_NAME = 'Verified';
 const PORT = process.env.PORT || 8000;
+const APP_URL = process.env.APP_URL;
 
 if (!process.env.DISCORD_BOT_TOKEN) {
   console.error('❌ DISCORD_BOT_TOKEN missing');
@@ -27,7 +29,7 @@ if (!process.env.DISCORD_BOT_TOKEN) {
    WEB SERVER
 ========================= */
 const app = express();
-app.get('/', (_, res) => res.send('Bot alive'));
+app.get('/', (_, res) => res.status(200).send('Bot is alive'));
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`🌐 Web server listening on port ${PORT}`);
 });
@@ -55,9 +57,13 @@ const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMembers,
-    GatewayIntentBits.GuildMessages
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent,
+    GatewayIntentBits.GuildVoiceStates
   ]
 });
+
+process.on('unhandledRejection', console.error);
 
 /* =========================
    COMMANDS
@@ -72,7 +78,7 @@ const commands = [
 
   new SlashCommandBuilder()
     .setName('setverifychannel')
-    .setDescription('Set verify channel')
+    .setDescription('Set verification channel')
     .setDefaultMemberPermissions(PermissionsBitField.Flags.ManageGuild),
 
   new SlashCommandBuilder()
@@ -87,7 +93,7 @@ const commands = [
 
   new SlashCommandBuilder()
     .setName('joinvc')
-    .setDescription('Bot joins your voice channel and stays')
+    .setDescription('Make the bot join and stay in your VC 24/7')
 ].map(c => c.toJSON());
 
 /* =========================
@@ -97,112 +103,105 @@ client.once('ready', async () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
 
   const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_BOT_TOKEN);
-  await rest.put(Routes.applicationCommands(client.user.id), { body: commands });
 
-  console.log('✅ Slash commands registered');
+  try {
+    await rest.put(Routes.applicationCommands(client.user.id), { body: commands });
+    console.log('✅ Global slash commands registered');
+  } catch (err) {
+    console.error('❌ Command registration failed:', err);
+  }
+
+  if (APP_URL) {
+    setInterval(() => axios.get(APP_URL).catch(() => {}), 5 * 60 * 1000);
+    console.log(`💓 Heartbeat active → ${APP_URL}`);
+  }
 });
 
 /* =========================
-   VERIFY CHANNEL DELETE
+   DELETE TEXT IN VERIFY CHANNEL
 ========================= */
-client.on('messageCreate', async message => {
-  if (!message.guild || message.author.bot) return;
+client.on('messageCreate', async (message) => {
+  if (message.author.bot || !message.guild) return;
 
   const settings = loadSettings();
   const g = settings[message.guild.id];
   if (!g?.verifyChannelId || g.paused) return;
   if (message.channel.id !== g.verifyChannelId) return;
 
-  try {
-    await message.delete();
-    await message.author.send(
-      'To verify, use:\n`/verify <Your Minecraft Username>`'
-    ).catch(() => {});
-  } catch (e) {
-    console.error('Delete failed:', e.message);
-  }
+  await message.delete().catch(() => {});
+  message.author.send(
+    '⚠️ Do not type in the verify channel.\nUse `/verify <username>` instead.'
+  ).catch(() => {});
 });
 
 /* =========================
    INTERACTIONS
 ========================= */
-client.on('interactionCreate', async interaction => {
+client.on('interactionCreate', async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
 
-  let replied = false;
+  const settings = loadSettings();
+  const gid = interaction.guild.id;
+  settings[gid] ??= { paused: false };
 
   try {
-    await interaction.deferReply({ ephemeral: true });
-    replied = true;
-
-    const settings = loadSettings();
-    const gid = interaction.guild.id;
-    settings[gid] ??= { paused: false };
-
     if (interaction.commandName === 'setverifychannel') {
       settings[gid].verifyChannelId = interaction.channel.id;
       settings[gid].paused = false;
       saveSettings(settings);
-      return interaction.editReply('✅ Verify channel set');
+      return interaction.reply({ content: '✅ Verify channel set', ephemeral: true });
     }
 
     if (interaction.commandName === 'pauseverify') {
       settings[gid].paused = true;
       saveSettings(settings);
-      return interaction.editReply('⏸ Verification paused');
+      return interaction.reply({ content: '⏸ Verification paused', ephemeral: true });
     }
 
     if (interaction.commandName === 'resumeverify') {
       settings[gid].paused = false;
       saveSettings(settings);
-      return interaction.editReply('▶️ Verification resumed');
-    }
-
-    if (interaction.commandName === 'joinvc') {
-      const vc = interaction.member.voice?.channel;
-      if (!vc) return interaction.editReply('❌ Join a VC first');
-
-      if (!getVoiceConnection(interaction.guild.id)) {
-        joinVoiceChannel({
-          channelId: vc.id,
-          guildId: interaction.guild.id,
-          adapterCreator: interaction.guild.voiceAdapterCreator,
-          selfDeaf: true
-        });
-      }
-
-      return interaction.editReply(`✅ Joined **${vc.name}**`);
+      return interaction.reply({ content: '▶️ Verification resumed', ephemeral: true });
     }
 
     if (interaction.commandName === 'verify') {
       if (!settings[gid].verifyChannelId)
-        return interaction.editReply('❌ Verify channel not set');
+        return interaction.reply({ content: '❌ Verification not set up', ephemeral: true });
 
       if (settings[gid].paused)
-        return interaction.editReply('⏸ Verification paused');
+        return interaction.reply({ content: '⏸ Verification paused', ephemeral: true });
 
       const username = interaction.options.getString('username');
       const member = interaction.member;
 
       let role = interaction.guild.roles.cache.find(r => r.name === VERIFIED_ROLE_NAME);
-      if (!role) {
-        role = await interaction.guild.roles.create({ name: VERIFIED_ROLE_NAME, color: 0x00ff00 });
-      }
+      if (!role) role = await interaction.guild.roles.create({ name: VERIFIED_ROLE_NAME, color: 0x00ff00 });
 
-      if (interaction.guild.ownerId !== member.id) {
-        await member.setNickname(username);
-      }
+      if (interaction.guild.ownerId !== member.id)
+        await member.setNickname(username).catch(() => {});
 
       await member.roles.add(role);
-      return interaction.editReply(`✅ Verified as **${username}**`);
+      return interaction.reply({ content: `✅ Verified as **${username}**`, ephemeral: true });
+    }
+
+    if (interaction.commandName === 'joinvc') {
+      const channel = interaction.member.voice.channel;
+      if (!channel)
+        return interaction.reply({ content: '❌ Join a voice channel first.', ephemeral: true });
+
+      joinVoiceChannel({
+        channelId: channel.id,
+        guildId: channel.guild.id,
+        adapterCreator: channel.guild.voiceAdapterCreator,
+        selfDeaf: true
+      });
+
+      return interaction.reply({ content: '🔊 I am now staying in this VC 24/7.', ephemeral: true });
     }
   } catch (e) {
-    console.error('Interaction error:', e);
-    if (!replied) {
-      try {
-        await interaction.reply({ content: '❌ Error occurred', ephemeral: true });
-      } catch {}
-    }
+    console.error(e);
+    if (!interaction.replied)
+      interaction.reply({ content: '❌ Something went wrong.', ephemeral: true });
   }
 });
 
