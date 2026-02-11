@@ -11,6 +11,7 @@ const {
   Routes,
   SlashCommandBuilder,
   PermissionsBitField,
+  MessageFlags,
 } = require('discord.js');
 
 const {
@@ -22,16 +23,10 @@ const {
 const VERIFIED_ROLE_NAME = 'Verified';
 const PORT = Number(process.env.PORT || 8000);
 
-// IMPORTANT: set in .env
 const TOKEN = process.env.DISCORD_BOT_TOKEN;
-const APP_ID = process.env.APP_ID; // required for clean command registration
+const APP_ID = process.env.APP_ID;
 
-// Command registration mode:
-// - "guild" = instant updates, best for bots you manage yourself
-// - "global" = takes time to appear/update (can look like commands “disappear”)
-const COMMAND_SCOPE = (process.env.COMMAND_SCOPE || 'guild').toLowerCase(); // "guild" or "global"
-
-// Set to "1" one time to wipe ALL old commands (global + guild) to remove duplicates:
+const COMMAND_SCOPE = (process.env.COMMAND_SCOPE || 'guild').toLowerCase();
 const CLEAN_SLASH_COMMANDS = process.env.CLEAN_SLASH_COMMANDS === '1';
 
 if (!TOKEN) {
@@ -39,11 +34,11 @@ if (!TOKEN) {
   process.exit(1);
 }
 if (!APP_ID) {
-  console.error('❌ APP_ID missing in .env (needed to register/clean slash commands)');
+  console.error('❌ APP_ID missing in .env');
   process.exit(1);
 }
 
-/* Web server (keeps Oracle instance “alive” + optional health check) */
+/* Web server */
 const app = express();
 app.get('/', (_, res) => res.send('Bot is alive'));
 app.listen(PORT, '0.0.0.0', () => console.log(`🌐 Web server listening on ${PORT}`));
@@ -70,20 +65,20 @@ function saveSettings(d) {
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMembers,      // needed for nicknames / roles reliably
-    GatewayIntentBits.GuildVoiceStates,  // needed for /joinvc
+    GatewayIntentBits.GuildMembers,
+    GatewayIntentBits.GuildVoiceStates,
   ],
 });
 
-process.on('unhandledRejection', (err) => console.error('unhandledRejection:', err));
-process.on('uncaughtException', (err) => console.error('uncaughtException:', err));
+process.on('unhandledRejection', console.error);
+process.on('uncaughtException', console.error);
 
 /* Slash commands */
 const commands = [
   new SlashCommandBuilder()
     .setName('verify')
     .setDescription('Verify your Minecraft username')
-    .addStringOption((o) =>
+    .addStringOption(o =>
       o.setName('username').setDescription('Minecraft username').setRequired(true)
     ),
 
@@ -95,96 +90,69 @@ const commands = [
   new SlashCommandBuilder()
     .setName('joinvc')
     .setDescription('Join your current voice channel and stay 24/7'),
-].map((c) => c.toJSON());
+].map(c => c.toJSON());
 
-/* Voice connections stored per guild */
-const voiceConnections = new Map(); // guildId -> connection
-
-async function safeReply(interaction, payload) {
-  // Never double-ack an interaction
-  try {
-    if (interaction.deferred || interaction.replied) {
-      return await interaction.editReply(payload);
-    }
-    return await interaction.reply(payload);
-  } catch (e) {
-    // If Discord says "Unknown interaction", it usually timed out; just log it.
-    console.error('safeReply error:', e?.message || e);
-  }
-}
+/* Voice connections */
+const voiceConnections = new Map();
 
 async function registerSlashCommands() {
   const rest = new REST({ version: '10' }).setToken(TOKEN);
 
-  // Optional: wipe everything first to kill duplicates
   if (CLEAN_SLASH_COMMANDS) {
-    console.log('🧹 CLEAN_SLASH_COMMANDS=1 -> wiping old slash commands (global + guild)...');
-
-    // Clear global
+    console.log('🧹 Wiping old slash commands...');
     await rest.put(Routes.applicationCommands(APP_ID), { body: [] });
-
-    // Clear each guild
-    const guildIds = client.guilds.cache.map((g) => g.id);
-    for (const gid of guildIds) {
-      await rest.put(Routes.applicationGuildCommands(APP_ID, gid), { body: [] });
+    for (const g of client.guilds.cache.values()) {
+      await rest.put(Routes.applicationGuildCommands(APP_ID, g.id), { body: [] });
     }
     console.log('🧹 Wipe complete.');
   }
 
   if (COMMAND_SCOPE === 'global') {
-    // Register global (slow to propagate)
     await rest.put(Routes.applicationCommands(APP_ID), { body: commands });
     console.log('✅ Registered GLOBAL slash commands');
   } else {
-    // Register per-guild (instant) + clear global to prevent duplicates
     await rest.put(Routes.applicationCommands(APP_ID), { body: [] });
-
-    const guildIds = client.guilds.cache.map((g) => g.id);
-    for (const gid of guildIds) {
-      await rest.put(Routes.applicationGuildCommands(APP_ID, gid), { body: commands });
+    for (const g of client.guilds.cache.values()) {
+      await rest.put(Routes.applicationGuildCommands(APP_ID, g.id), { body: commands });
     }
-    console.log(`✅ Registered GUILD slash commands for ${guildIds.length} guild(s) (instant)`);
+    console.log(`✅ Registered GUILD slash commands for ${client.guilds.cache.size} guild(s)`);
   }
 }
 
 /* Ready */
 client.once('ready', async () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
-
-  try {
-    await registerSlashCommands();
-  } catch (e) {
-    console.error('❌ Slash command registration failed:', e?.message || e);
-  }
+  await registerSlashCommands();
 });
 
 /* Interactions */
 client.on('interactionCreate', async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
   if (!interaction.inGuild()) {
-    return safeReply(interaction, { content: '❌ Commands only work in servers.', ephemeral: true });
+    try {
+      return await interaction.reply({
+        content: '❌ Commands only work in servers.',
+        flags: MessageFlags.Ephemeral,
+      });
+    } catch { return; }
   }
 
-  // Always defer quickly to avoid "Unknown interaction" (3s timeout)
-  await interaction.deferReply({ ephemeral: true });
+  try {
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+  } catch {
+    return;
+  }
 
   try {
-    // /joinvc
     if (interaction.commandName === 'joinvc') {
-      const member = interaction.member; // GuildMember
-      const channel = member?.voice?.channel;
-
+      const channel = interaction.member?.voice?.channel;
       if (!channel) {
-        return safeReply(interaction, {
-          content: '❌ Join a voice channel first, then run /joinvc again.',
-          ephemeral: true,
-        });
+        return await interaction.editReply('❌ Join a voice channel first.');
       }
 
-      // If already connected, destroy and reconnect cleanly
-      const existing = voiceConnections.get(channel.guild.id);
-      if (existing) {
-        try { existing.destroy(); } catch {}
+      const old = voiceConnections.get(channel.guild.id);
+      if (old) {
+        try { old.destroy(); } catch {}
         voiceConnections.delete(channel.guild.id);
       }
 
@@ -193,116 +161,74 @@ client.on('interactionCreate', async (interaction) => {
         guildId: channel.guild.id,
         adapterCreator: channel.guild.voiceAdapterCreator,
         selfDeaf: true,
-        selfMute: false,
       });
 
       voiceConnections.set(channel.guild.id, conn);
 
-      conn.on('stateChange', (oldState, newState) => {
-        // Useful for debugging reconnections
-        console.log(
-          `🔊 VC state [${channel.guild.name}]: ${oldState.status} -> ${newState.status}`
-        );
-      });
-
       try {
         await entersState(conn, VoiceConnectionStatus.Ready, 20_000);
-      } catch (e) {
-        console.error('❌ VC connect failed:', e?.message || e);
+      } catch {
         try { conn.destroy(); } catch {}
         voiceConnections.delete(channel.guild.id);
-
-        return safeReply(interaction, {
-          content:
-            '❌ I couldn’t connect to that voice channel. Check bot permissions (Connect/Speak) and try again.',
-          ephemeral: true,
-        });
+        return await interaction.editReply('❌ Could not connect to voice channel.');
       }
 
-      return safeReply(interaction, {
-        content: `✅ Joined **${channel.name}** and staying 24/7.`,
-        ephemeral: true,
-      });
+      return await interaction.editReply(`✅ Joined **${channel.name}** and staying 24/7.`);
     }
 
-    // /setverifychannel
     if (interaction.commandName === 'setverifychannel') {
       const s = loadSettings();
       s[interaction.guild.id] = { verifyChannelId: interaction.channel.id };
       saveSettings(s);
-
-      return safeReply(interaction, { content: '✅ Verify channel set.', ephemeral: true });
+      return await interaction.editReply('✅ Verify channel set.');
     }
 
-    // /verify
     if (interaction.commandName === 'verify') {
       const s = loadSettings();
       const gid = interaction.guild.id;
 
       if (!s[gid]?.verifyChannelId) {
-        return safeReply(interaction, {
-          content: '❌ Verify channel not set. Use /setverifychannel in the channel you want.',
-          ephemeral: true,
-        });
+        return await interaction.editReply('❌ Verify channel not set.');
       }
       if (interaction.channel.id !== s[gid].verifyChannelId) {
-        return safeReply(interaction, {
-          content: '❌ Use /verify in the verify channel only.',
-          ephemeral: true,
-        });
+        return await interaction.editReply('❌ Use /verify in the verify channel.');
       }
 
       const username = interaction.options.getString('username', true);
-      const member = interaction.member; // GuildMember
+      const member = interaction.member;
 
-      // Get/create role
-      let role = interaction.guild.roles.cache.find((r) => r.name === VERIFIED_ROLE_NAME);
+      let role = interaction.guild.roles.cache.find(r => r.name === VERIFIED_ROLE_NAME);
       if (!role) {
-        role = await interaction.guild.roles.create({
-          name: VERIFIED_ROLE_NAME,
-          color: 0x00ff00,
-          reason: 'Auto-created by SkygenVerifier',
-        });
+        role = await interaction.guild.roles.create({ name: VERIFIED_ROLE_NAME, color: 0x00ff00 });
       }
 
-      // Nickname: Discord does not allow changing the server OWNER’s nickname via bots.
-      let nickResult = '';
+      let nickMsg = '';
       if (interaction.guild.ownerId === member.id) {
-        nickResult = 'ℹ️ Note: I can’t change the server owner’s nickname (Discord limitation).';
+        nickMsg = 'ℹ️ I can’t change the server owner’s nickname.';
       } else {
         try {
           await member.setNickname(username);
-          nickResult = '✅ Nickname updated.';
+          nickMsg = '✅ Nickname updated.';
         } catch {
-          nickResult = '⚠️ I couldn’t change your nickname (missing “Manage Nicknames” permission).';
+          nickMsg = '⚠️ Could not change nickname (permissions/role order).';
         }
       }
 
-      // Role add
       try {
         await member.roles.add(role);
       } catch {
-        return safeReply(interaction, {
-          content:
-            '❌ I couldn’t add the Verified role. Make sure my role is ABOVE the Verified role and I have “Manage Roles”.',
-          ephemeral: true,
-        });
+        return await interaction.editReply('❌ I can’t add the Verified role. Check role order.');
       }
 
-      return safeReply(interaction, {
-        content: `✅ Verified as **${username}**\n${nickResult}`,
-        ephemeral: true,
-      });
+      return await interaction.editReply(`✅ Verified as **${username}**\n${nickMsg}`);
     }
 
-    // Unknown command (shouldn’t happen)
-    return safeReply(interaction, { content: '❌ Unknown command.', ephemeral: true });
-  } catch (err) {
-    console.error('interaction handler error:', err);
-    return safeReply(interaction, {
-      content: '❌ Something went wrong handling that command. Check PM2 logs.',
-      ephemeral: true,
-    });
+    return await interaction.editReply('❌ Unknown command.');
+  } catch (e) {
+    console.error('interaction error:', e);
+    try {
+      return await interaction.editReply('❌ Command failed. Check PM2 logs.');
+    } catch {}
   }
 });
 
