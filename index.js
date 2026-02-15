@@ -18,7 +18,7 @@ joinVoiceChannel,
 entersState,
 VoiceConnectionStatus,
 } = require(’@discordjs/voice’);
-console.log('New Code Running!');
+
 /* =========================
 CONFIG
 ========================= */
