@@ -1,3 +1,4 @@
+console.log('New Code Running!');
 require(‘dotenv’).config();
 
 const fs = require(‘fs’);
